@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         115 网盘 Aria2 助手
-// @version      0.2.2
+// @version      0.2.4
 
 // @description  直接将所选 115 下载链接发送至 Aria2
 // @author       tces1
@@ -19,15 +19,7 @@
 // @require      https://cdn.bootcdn.net/ajax/libs/big-integer/1.6.51/BigInteger.min.js
 // @require      https://cdn.bootcdn.net/ajax/libs/blueimp-md5/2.18.0/js/md5.min.js
 // @run-at       document-end
-// @namespace    https://greasyfork.org/users/373796
 // ==/UserScript==
-// @version      0.1.6 @ 2021-04-01: This project has not been maintained for nearly three years. I fixed it by the method in the fake115 project. If it involves infringement, please notify me tg @HadsFrank.
-// @version      0.1.7 @ 2021-04-19: 很多人修改不好，在tg上问我，算了直接把代码复制过来，不用修改了.
-// @version      0.1.8 @ 2021-04-20: 重新引入库.
-// @version      0.1.9 @ 2021-05-14: 增加通知使能选项，且通知弹出后3秒自动消失.
-// @version      0.2.0 @ 2021-05-17: 更改排队模型为并发，提高发送性能，并修改aria2按钮功能，调整为点击发送至Aria2，按住Ctrl(WIN)/Command(MAC)点击直接浏览器下载，按住Alt点击仅复制下载链接，鼠标悬停按钮可见提示
-// @version      0.2.1 @ 2021-05-18: 支持目录下载，发送至aira2的请求将保留目录结构，浏览器直接下载不会保留目录结构按平铺下载，近期不会再开发新功能了，仅维护现有功能
-// @version      0.2.2 @ 2022-10-03: 适配115新版接口加密方案。Credit to https://gist.github.com/showmethemoney2022/430ef0e45eeb7c99fedda2d2585cfe2e
 // @inspiredBy   https://greasyfork.org/en/scripts/7749-115-download-helper
 // @inspiredBy   https://github.com/robbielj/chrome-aria2-integration
 // @inspiredBy   https://github.com/kkHAIKE/fake115
@@ -94,7 +86,8 @@ const modalStyles = `
 }
 
 .aria2-config-field input[type="text"],
-.aria2-config-field input[type="password"] {
+.aria2-config-field input[type="password"],
+.aria2-config-field input[type="number"] {
     padding: 5px;
     border: 1px solid #ddd;
     border-radius: 3px;
@@ -225,6 +218,14 @@ const configModalHTML = `
                 <input type="text" id="current_subdir" name="current_subdir" placeholder="默认为空">
             </div>
             <div class="aria2-config-field">
+                <label for="min_file_size_mb">最小文件大小 (MB):</label>
+                <input type="number" id="min_file_size_mb" name="min_file_size_mb" placeholder="0" min="0" step="0.1">
+            </div>
+            <div class="aria2-config-field">
+                <label for="start_after_string">开始下载位置 (部分匹配文件名):</label>
+                <input type="text" id="start_after_string" name="start_after_string" placeholder="输入文件名的一部分，从匹配的文件开始下载">
+            </div>
+            <div class="aria2-config-field">
                 <label>
                     <input type="checkbox" id="debug_mode" name="debug_mode">
                     调试模式
@@ -272,6 +273,8 @@ let Configs = {
     'download_dir': GM_getValue('download_dir', '/root/tg-upload-py/downloads'),
     'current_subdir': GM_getValue('current_subdir', ''),
     'recent_subdirs': GM_getValue('recent_subdirs', []),
+    'min_file_size_mb': GM_getValue('min_file_size_mb', 0),
+    'start_after_string': GM_getValue('start_after_string', ''),
 };
 
 // Config modal management
@@ -577,6 +580,7 @@ let Aria2RPC = (function ($win, $doc) {
                 // secret, since v1.18.4
                 reqParams.params.unshift('token:' + Configs.rpc_token);
             }
+
             debug(reqParams)
 
             // send to aria2, @todo: support metalink?
@@ -653,6 +657,9 @@ let Aria2RPC = (function ($win, $doc) {
             if (Object.keys(finalOptions).length > 0) {
                 reqParams.params.push(finalOptions);
             }
+
+            reqParams.params.push(0); // 0: add to the start of the queue in aria2
+
             
             // If in debug mode, log information instead of sending request
             if (Configs.debug_mode) {
@@ -727,16 +734,117 @@ let DirectDownload = (function ($win, $doc) {
 // Queue Manager
 let QueueManager = (function ($win, $doc) {
     // constants
-    const STATUS_DIR_UNPARSE = 5;
-    const STATUS_DIR_PARSED = 4;
     const STATUS_SENT_TO_DIRECT_DOWNLOAD = 3;
     const STATUS_SENT_TO_ARIA2 = 2;
     const STATUS_START = 1;
     const STATUS_UNSTART = 0;
     const STATUS_DOWNLOAD_FAILURE = -1;
     const STATUS_LINK_FETCH_FAILURE = -2;
-    const STATUS_GET_SUB_DIR_FAILURE = -5;
-    const STATUS_GET_SUB_FILE_FAILURE = -6;
+    const STATUS_GET_DIR_FILES_FAILURE = -3;
+
+    // Pure function to fetch download link for a file
+    function fetchDownloadLink(pickcode) {
+        return new Promise((resolve, reject) => {
+            let data, key, tm, tmus;
+            tmus = (new Date()).getTime();
+            tm = Math.floor(tmus / 1000);
+            ({data, key} = crypto_115.m115_encode(JSON.stringify({pickcode}), tm));
+            
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: `http://proapi.115.com/app/chrome/downurl?t=${tm}`,
+                data: `data=${encodeURIComponent(data)}`,
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                },
+                onload: (resp) => {
+                    if (resp.status === 200) {
+                        try {
+                            let parsed = JSON.parse(resp.responseText);
+                            if (!parsed.state) {
+                                reject(new Error(parsed.msg || 'Failed to fetch download link'));
+                                return;
+                            }
+                            let resp_data = JSON.parse(crypto_115.m115_decode(parsed.data, key));
+                            let fileResp = Object.values(resp_data)[0];
+                            if (fileResp && fileResp.url && fileResp.url.url) {
+                                resolve({
+                                    url: Configs.use_http ? 
+                                        fileResp.url.url.replace('https://', 'http://') : 
+                                        fileResp.url.url,
+                                    cookie: document.cookie
+                                });
+                            } else {
+                                reject(new Error('Invalid response format'));
+                            }
+                        } catch (e) {
+                            reject(e);
+                        }
+                    } else {
+                        reject(new Error(`HTTP ${resp.status}: ${resp.statusText}`));
+                    }
+                },
+                onerror: (resp) => reject(new Error('Network error'))
+            });
+        });
+    }
+
+    // Pure function to fetch direct children files from a directory
+    function fetchDirectoryFiles(cid, aid) {
+        return new Promise((resolve, reject) => {
+            let allFiles = [];
+            const limit = 32; // Items per page
+            
+            function fetchPage(offset) {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url: `https://webapi.115.com/files?aid=${aid}&cid=${cid}&o=user_ptime&asc=0&offset=${offset}&show_dir=1&limit=${limit}&snap=0&natsort=1&record_open_time=1&count_folders=1&format=json`,
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Cookie': document.cookie,
+                    },
+                    onload: (resp) => {
+                        if (resp.status === 200) {
+                            try {
+                                let parsed = JSON.parse(resp.responseText);
+                                if (!parsed.state) {
+                                    reject(new Error(parsed.error || 'Failed to fetch directory files'));
+                                    return;
+                                }
+                                
+                                console.log("Parsed data:", parsed.data);
+                                // Only collect direct children files (no subdirectories)
+                                let pageFiles = parsed.data
+                                    .filter(item => item.fid) // Only files, not directories
+                                    .map(item => ({
+                                        name: item.n,
+                                        pickcode: item.pc,
+                                        size: item.s,
+                                    }));
+                                
+                                allFiles = allFiles.concat(pageFiles);
+                                
+                                // Check if there are more pages
+                                if (offset + limit < parsed.count) {
+                                    fetchPage(offset + limit);
+                                } else {
+                                    resolve(allFiles);
+                                }
+                            } catch (e) {
+                                reject(e);
+                            }
+                        } else {
+                            reject(new Error(`HTTP ${resp.status}: ${resp.statusText}`));
+                        }
+                    },
+                    onerror: (resp) => reject(new Error('Network error'))
+                });
+            }
+            
+            // Start fetching from offset 0
+            fetchPage(0);
+        });
+    }
 
     // constructor
     function Mgr(options) {
@@ -754,10 +862,13 @@ let QueueManager = (function ($win, $doc) {
             return {
                 'name': node.getAttribute('title'),
                 'code': node.getAttribute('pick_code'),
+                'cid': node.getAttribute('cate_id'),
+                'aid': node.getAttribute('area_id'),
                 'link': null,
                 'dir': '',
                 'cookie': null,
-                'status': '1' === node.getAttribute('file_type') ? STATUS_UNSTART : STATUS_DIR_UNPARSE
+                'isDirectory': node.getAttribute('file_type') === '0',
+                'status': STATUS_UNSTART
             };
         }, this);
 
@@ -790,307 +901,240 @@ let QueueManager = (function ($win, $doc) {
     };
 
     // methods
-    Mgr.prototype.errorHandler = function (errCode, idx, resp) {
+    Mgr.prototype.errorHandler = function (errCode, idx, error) {
         this.errMsgs.push('File #' + idx + ': ');
         this.errMsgs.push("\t" + 'File Info: ' + JSON.stringify(this.queue[idx]));
-        this.errMsgs.push("\t" + 'HTTP Status: ' + resp.status + ' - ' + resp.statusText);
-
-        let errMsg = 'Unknown';
-        if ('responseText' in resp) {
-            try {
-                let err = JSON.parse(resp.responseText);
-                errMsg = err.error.message;
-            } catch (e) {
-                errMsg = e;
-            }
-        } else if ('msg' in resp) {
-            errMsg = resp.msg;
-        }
-
-        this.errMsgs.push("\t" + 'Err Msg:' + errMsg);
+        this.errMsgs.push("\t" + 'Error: ' + error.message);
 
         // update the status
         this.queue[idx].status = errCode;
         this.next();
     };
+
     Mgr.prototype.aria2DownloadHandler = function (idx, resp) {
         if (200 === resp.status && 'responseText' in resp) {
             // update the status
+            console.log("Sent to aria2:", this.queue[idx].name)
             this.queue[idx].status = STATUS_SENT_TO_ARIA2;
             this.next();
         } else {
             // failed
-            this.errorHandler.call(this, STATUS_DOWNLOAD_FAILURE, idx, resp);
+            this.errorHandler.call(this, STATUS_DOWNLOAD_FAILURE, idx, new Error(`HTTP ${resp.status}: ${resp.statusText}`));
         }
     };
+
     Mgr.prototype.directDownloadHandler = function (idx) {
         this.queue[idx].status = STATUS_SENT_TO_DIRECT_DOWNLOAD;
         this.next();
     };
+
     Mgr.prototype.download = function (idx) {
         if (this.options.copyOnly) {
             this.queue[idx].status = STATUS_SENT_TO_ARIA2;
             this.next();
+            return;
         }
-        // send to dirct download
-        else if (this.options.directDownload) {
+        
+        // send to direct download
+        if (this.options.directDownload) {
             debug("direct download: ", this.queue[idx].link)
             DirectDownload.add(this.queue[idx].link,
                 this.directDownloadHandler.bind(this, idx),
                 this.errorHandler.bind(this, STATUS_DOWNLOAD_FAILURE, idx)
-            )
-        }
-        // send to aria2
-        else {
-            Aria2RPC.add(this.queue[idx].link, {
-                    'referer': $doc.URL,
-                    'header': ['Cookie: ' + this.queue[idx].cookie, 'User-Agent: ' + $win.navigator.userAgent],
-                    'dir': this.subdir,
-                    'out': this.queue[idx].name
-                },
-                this.aria2DownloadHandler.bind(this, idx),
-                this.errorHandler.bind(this, STATUS_DOWNLOAD_FAILURE, idx)
             );
+            return;
         }
+        
+        // send to aria2
+        // Truncate filename if it exceeds 70 characters
+        let filename = this.queue[idx].name;
+        if (filename.length > 70) {
+            const extension = filename.lastIndexOf('.') > -1 ? filename.slice(filename.lastIndexOf('.')) : '';
+            filename = filename.slice(0, 70 - extension.length) + extension;
+        }
+
+        Aria2RPC.add(this.queue[idx].link, {
+                'referer': $doc.URL,
+                'header': ['Cookie: ' + this.queue[idx].cookie, 'User-Agent: ' + $win.navigator.userAgent],
+                'dir': this.subdir,
+                'out': filename
+            },
+            this.aria2DownloadHandler.bind(this, idx),
+            this.errorHandler.bind(this, STATUS_DOWNLOAD_FAILURE, idx)
+        );
     };
 
-    Mgr.prototype.getSubDirsHandler = function (idx, page, raw_resp) {
-        let resp = JSON.parse(raw_resp.responseText);
-        if (!resp.state) {
-            this.errorHandler.call(this, STATUS_GET_SUB_DIR_FAILURE, idx, resp);
-        } else {
-            resp_data = resp.data
-        }
-        this.DIR_TREE.push(resp_data.root)
-        for (let item of resp_data.list) {
-            if (item.hasOwnProperty("pid")) {
-                for (let _item of this.DIR_TREE) {
-                    if (item.pid == _item.fid) {
-                        item.fn = _item.fn + "/" + item.fn
-                        break
+    Mgr.prototype.processQueue = async function() {
+        for (let idx = 0; idx < this.queue.length; idx++) {
+            const item = this.queue[idx];
+            
+            try {
+                if (item.isDirectory) {
+                    // Fetch direct children files from directory
+                    console.log("Processing directory:", item.name);
+                    const files = await fetchDirectoryFiles(item.cid, item.aid);
+                    
+                    // Add files to queue with size filtering and start-after filtering
+                    let addedCount = 0;
+                    let skippedCount = 0;
+                    let startAfterCount = 0;
+                    let foundStartAfter = !Configs.start_after_string || Configs.start_after_string.trim() === '';
+                    
+                    for (const file of files) {
+                        // Check start-after filter first
+                        if (!foundStartAfter) {
+                            if (file.name.toLowerCase().includes(Configs.start_after_string.toLowerCase())) {
+                                foundStartAfter = true;
+                                if (Configs.debug_mode) {
+                                    console.log(`Found start-after match: ${file.name}`);
+                                }
+                            } else {
+                                startAfterCount++;
+                                if (Configs.debug_mode) {
+                                    console.log(`Skipping file before start-after: ${file.name}`);
+                                }
+                                continue;
+                            }
+                        }
+                        
+                        // Convert size from bytes to megabytes
+                        const fileSizeMB = file.size / (1024 * 1024);
+                        
+                        // Filter by minimum file size
+                        if (fileSizeMB >= Configs.min_file_size_mb) {
+                            const fileItem = {
+                                name: file.name,
+                                code: file.pickcode,
+                                cid: item.cid,
+                                aid: item.aid,
+                                link: null,
+                                dir: '',
+                                cookie: null,
+                                isDirectory: false,
+                                status: STATUS_UNSTART,
+                                size: file.size,
+                                sizeMB: fileSizeMB
+                            };
+                            this.queue.push(fileItem);
+                            addedCount++;
+                        } else {
+                            skippedCount++;
+                            if (Configs.debug_mode) {
+                                console.log(`Skipping file ${file.name} (${fileSizeMB.toFixed(2)} MB < ${Configs.min_file_size_mb} MB)`);
+                            }
+                        }
                     }
-                }
-                this.DIR_TREE.push(item)
-            }
-        }
-        if (resp_data.has_next_page) {
-            this.getSubDirs(idx, page + 1)
-        } else {
-            debug("Directory tree:", this.DIR_TREE)
-            this.getSubFiles(idx, 1)
-        }
-    };
-
-
-    Mgr.prototype.getSubDirs = function (idx, page = 1) {
-        request = (idx, page, onload, onerror) => {
-            tmus = (new Date()).getTime();
-            tm = Math.floor(tmus / 1000);
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: `http://proapi.115.com/app/chrome/downfolders?pickcode=${this.queue[idx].code}&page=${page}&t=${tm}`,
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Cookie': document.cookie,
-                },
-                onload,
-                onerror,
-            });
-        }
-        request(
-            idx,
-            page,
-            this.getSubDirsHandler.bind(this, idx, page),
-            this.errorHandler.bind(this, STATUS_GET_SUB_DIR_FAILURE, idx),
-        )
-    }
-
-    Mgr.prototype.getSubFilesHandler = function (idx, page, raw_resp) {
-        let resp = JSON.parse(raw_resp.responseText);
-        if (!resp.state) {
-            this.errorHandler.call(this, STATUS_GET_SUB_FILE_FAILURE, idx, resp);
-        } else {
-            resp_data = resp.data
-        }
-        for (let item of resp_data.list) {
-            if (item.hasOwnProperty("pid")) {
-                dir = ""
-                for (let _item of this.DIR_TREE) {
-                    if (item.pid == _item.fid) {
-                        dir = _item.fn
-                        break
+                    
+                    // Store filtering statistics for later use
+                    if (!this.filterStats) this.filterStats = { added: 0, skipped: 0, startAfterSkipped: 0 };
+                    this.filterStats.added += addedCount;
+                    this.filterStats.skipped += skippedCount;
+                    this.filterStats.startAfterSkipped += startAfterCount;
+                    
+                    if (Configs.debug_mode) {
+                        console.log(`Directory "${item.name}": ${addedCount} files added, ${skippedCount} files skipped (< ${Configs.min_file_size_mb} MB), ${startAfterCount} files skipped before start-after`);
                     }
+                    
+                    // Mark directory as processed (don't try to download it)
+                    item.status = STATUS_SENT_TO_ARIA2;
+                } else {
+                    // Fetch download link for file
+                    console.log("Processing file:", item.name);
+                    const linkData = await fetchDownloadLink(item.code);
+                    item.link = linkData.url;
+                    item.cookie = linkData.cookie;
+                    item.status = STATUS_START;
+                    
+                    // Download the file
+                    this.download(idx);
                 }
-                this.queue.push({
-                    name: 'generate_item',
-                    code: item.pc,
-                    link: null,
-                    dir: dir,
-                    cookie: null,
-                    status: STATUS_UNSTART,
-                })
-            }
-        }
-        if (resp_data.has_next_page) {
-            this.getSubFiles(idx, page + 1)
-        } else {
-            this.queue[idx].status = STATUS_DIR_PARSED;
-            this.fetchLink(idx)
-        }
-    };
-
-
-    Mgr.prototype.getSubFiles = function (idx, page = 1) {
-        request = (idx, page, onload, onerror) => {
-            tmus = (new Date()).getTime();
-            tm = Math.floor(tmus / 1000);
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: `http://proapi.115.com/app/chrome/downfiles?pickcode=${this.queue[idx].code}&page=${page}&t=${tm}`,
-                headers: {
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Cookie': document.cookie,
-                },
-                onload,
-                onerror,
-            });
-        }
-        request(
-            idx,
-            page,
-            this.getSubFilesHandler.bind(this, idx, page),
-            this.errorHandler.bind(this, STATUS_GET_SUB_FILE_FAILURE, idx),
-        )
-    }
-
-
-    Mgr.prototype.fetchLinkHandler = function (idx, key, raw_resp) {
-        let resp = JSON.parse(raw_resp.responseText);
-        if (!resp.state) {
-            alert(resp.msg);
-            this.errorHandler.call(this, STATUS_LINK_FETCH_FAILURE, idx, resp);
-        } else {
-            resp_data = JSON.parse(crypto_115.m115_decode(resp.data, key))
-        }
-
-        final_cookie = document.cookie
-        resp = {}
-        for (let i in resp_data) {
-            resp = resp_data[i];
-            break;
-        }
-
-        if ('url' in resp && 'url' in resp.url) {
-            // update the link
-            this.queue[idx].link = Configs.use_http ?
-                resp.url.url.replace('https://', 'http://') // http only?
-                :
-                resp.url.url;
-            this.queue[idx].cookie = final_cookie;
-            this.queue[idx].status = STATUS_START;
-            this.download(idx);
-        } else {
-            this.errorHandler.call(this, STATUS_LINK_FETCH_FAILURE, idx, resp);
-        }
-    };
-
-
-    Mgr.prototype.fetchLink = function (idex_o = 0) {
-        for (let idx = idex_o; idx < this.queue.length; idx++) {
-            if (this.queue[idx].status === STATUS_UNSTART) {
-                let data, key, tm, tmus;
-                tmus = (new Date()).getTime();
-                tm = Math.floor(tmus / 1000);
-                ({
-                    data,
-                    key
-                } = crypto_115.m115_encode(JSON.stringify({
-                    pickcode: this.queue[idx].code
-                }), tm));
-                GM_xmlhttpRequest({
-                    method: 'POST',
-                    url: `http://proapi.115.com/app/chrome/downurl?t=${tm}`,
-                    data: `data=${encodeURIComponent(data)}`,
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded'
-                    },
-                    onload: this.fetchLinkHandler.bind(this, idx, key),
-                    onerror: this.errorHandler.bind(this, STATUS_LINK_FETCH_FAILURE, idx)
-                });
-            } else if (this.queue[idx].status === STATUS_DIR_UNPARSE) {
-                this.getSubDirs(idx)
-                break
+            } catch (error) {
+                console.error(`Error processing ${item.name}:`, error);
+                this.errorHandler(item.isDirectory ? STATUS_GET_DIR_FILES_FAILURE : STATUS_LINK_FETCH_FAILURE, idx, error);
             }
         }
     };
 
     Mgr.prototype.init = function () {
-        // fetch link in parallel
-        debug("Init queue:", this.queue)
-        this.DIR_TREE = []
-        this.FILE_TREE = []
-        this.fetchLink();
-    }
+        // Process queue
+        debug("Init queue:", this.queue);
+        this.processQueue().then(() => {
+            // All items processed, check for completion
+            this.next();
+        }).catch(error => {
+            console.error("Error processing queue:", error);
+        });
+    };
 
     Mgr.prototype.next = function () {
-        // check if it's the queue is empty
-        let nextIdx = this.queue.findIndex(function (file) {
-            return STATUS_UNSTART === file.status;
+        // check if the queue is complete
+        let pendingItems = this.queue.filter(function (file) {
+            return file.status === STATUS_UNSTART || file.status === STATUS_START;
         });
-        // handle the next file
-        if (-1 === nextIdx) {
-            let report = this.queue.reduce(function (accumulator, file) {
-                switch (file.status) {
-                    // task finished
-                    case STATUS_SENT_TO_DIRECT_DOWNLOAD:
-                        accumulator.finished += 1;
-                        accumulator.links.push(file.link);
-                        break;
-                    case STATUS_SENT_TO_ARIA2:
-                        accumulator.finished += 1;
-                        accumulator.links.push(file.link);
-                        break;
-                    case STATUS_DOWNLOAD_FAILURE:
-                        accumulator.links.push(file.link);
-                        break;
-                    case STATUS_DIR_PARSED:
-                        accumulator.dir += 1;
-                        break;
-                }
 
+        if (pendingItems.length === 0) {
+            let report = this.queue.reduce(function (accumulator, file) {
+                if (!file.isDirectory) { // Only count actual files
+                    switch (file.status) {
+                        case STATUS_SENT_TO_DIRECT_DOWNLOAD:
+                        case STATUS_SENT_TO_ARIA2:
+                            accumulator.finished += 1;
+                            accumulator.links.push(file.link);
+                            break;
+                        case STATUS_DOWNLOAD_FAILURE:
+                        case STATUS_LINK_FETCH_FAILURE:
+                        case STATUS_GET_DIR_FILES_FAILURE:
+                            accumulator.failed += 1;
+                            if (file.link) accumulator.links.push(file.link);
+                            break;
+                    }
+                }
                 return accumulator;
             }, {
                 'links': [],
                 'finished': 0,
-                'dir': 0
+                'failed': 0
             });
-            let queueSize = this.queue.length - report.dir;
+
+            let totalFiles = report.finished + report.failed;
             let msg = [];
 
-            msg.push('所选 ' + queueSize + ' 项已处理完毕：');
+            msg.push(`所选 ${totalFiles} 个文件已处理完毕：`);
             if (!this.options.copyOnly) {
-                if (report.finished == 0) {
-                    msg.push('全部 发送失败');
+                if (report.finished === 0) {
+                    msg.push('全部发送失败');
+                } else if (report.failed === 0) {
+                    msg.push('全部发送成功');
                 } else {
-                    msg.push((queueSize === report.finished ? '全部' : '' + report.finished + '/' + queueSize) + ' 发送成功');
+                    msg.push(`${report.finished}/${totalFiles} 发送成功`);
                 }
             }
+            
+            // Add filtering statistics if any files were skipped
+            if (this.filterStats) {
+                if (this.filterStats.skipped > 0) {
+                    msg.push(`已跳过 ${this.filterStats.skipped} 个小于 ${Configs.min_file_size_mb} MB 的文件`);
+                }
+                if (this.filterStats.startAfterSkipped > 0) {
+                    msg.push(`已跳过 ${this.filterStats.startAfterSkipped} 个在开始位置之前的文件`);
+                }
+            }
+            
             _notification(msg.join("\n"));
-            msg = [];
+
             if (this.options.copyOnly || Configs.sync_clipboard) {
                 let downloadLinks = report.links.join("\n");
                 if (false === /\sSafari\/\d+\.\d+\.\d+/.test($win.navigator.userAgent)) {
                     // sync to clipboard
                     GM_setClipboard(downloadLinks, 'text');
-                    msg.push('下载地址已同步至剪贴板');
-                    _notification(msg.join("\n"));
+                    _notification('下载地址已同步至剪贴板');
                 } else if (this.options.copyOnly) {
                     prompt('本浏览器不支持访问剪贴板，请手动全选复制', downloadLinks);
                 }
             }
 
             if (this.errMsgs.length) {
-                throw Error(this.errMsgs.join("\n"));
+                console.error(this.errMsgs.join("\n"));
             }
         }
     };
@@ -1107,7 +1151,13 @@ let UiHelper = (function ($win, $doc) {
         // If clicking a subdir item, handle subdir selection
         if (evt.target.classList.contains('subdir-item')) {
             evt.preventDefault();
-            if (evt.target.title === "新建子目录") {
+            if (evt.target.title === "设置开始位置") {
+                const startAfter = prompt('请输入文件名的一部分，从匹配的文件开始下载:', Configs.start_after_string);
+                if (startAfter !== null) {
+                    Configs.start_after_string = startAfter.trim();
+                    GM_setValue('start_after_string', Configs.start_after_string);
+                }
+            } else if (evt.target.title === "新建子目录") {
                 const subdir = prompt('请输入子目录名称:', Configs.current_subdir);
                 if (subdir !== null) {
                     Configs.current_subdir = subdir.trim();
@@ -1140,7 +1190,7 @@ let UiHelper = (function ($win, $doc) {
         // Add Aria2 button
         let ariaTrigger = $doc.createElement('li');
         ariaTrigger.id = _triggerId;
-        ariaTrigger.title = `当前子目录: ${Configs.current_subdir}\n点击发送至Aria2\n按住Alt点击仅复制链接\n按住Ctrl/Command点击直接下载`;
+        ariaTrigger.title = `当前子目录: ${Configs.current_subdir}`;
         ariaTrigger.innerHTML = `
             <i class="icon-operate ifo-share"></i>
             <span>Aria2</span>
@@ -1168,13 +1218,14 @@ let UiHelper = (function ($win, $doc) {
                     </dt>
                     <dd>
                         <div class="list-filter" id="js_subdir_box">
+                            <a href="javascript:;" class="subdir-item" title="设置开始位置" style="color: #0066cc; font-weight: bold;">
+                                <span>设置开始位置...</span>
+                            </a>
                             <a href="javascript:;" class="subdir-item" title="新建子目录" style="color: #666; font-weight: bold;">
-                                <i class="iofl-newfolder"></i>
                                 <span>新建子目录...</span>
                             </a>
                             ${(Configs.recent_subdirs || []).map(dir => `
                                 <a href="javascript:;" class="subdir-item" title="${dir}">
-                                    <i class="iofl-folder"></i>
                                     <span>${dir}</span>
                                 </a>
                             `).join('')}
@@ -1187,8 +1238,12 @@ let UiHelper = (function ($win, $doc) {
         // Add event listeners for popup
         ariaTrigger.addEventListener('mouseenter', () => {
             const rect = ariaTrigger.getBoundingClientRect();
-            popupBox.style.left = (rect.left - 30) + 'px';
-            popupBox.style.top = (rect.bottom + 8) + 'px';
+            const scrollTop = window.scrollY;
+            const scrollLeft = window.scrollX;
+            
+            // Position the popup below the button
+            popupBox.style.top = (rect.bottom + scrollTop + 8) + 'px';
+            popupBox.style.left = (rect.left + scrollLeft - 10) + 'px'; // Align with button, accounting for padding
             popupBox.style.display = 'block';
         });
 
@@ -1206,7 +1261,13 @@ let UiHelper = (function ($win, $doc) {
             e.stopPropagation();
 
             const title = subdirItem.title;
-            if (title === '新建子目录') {
+            if (title === '设置开始位置') {
+                const startAfter = prompt('请输入文件名的一部分，从匹配的文件开始下载:', Configs.start_after_string);
+                if (startAfter !== null) {
+                    Configs.start_after_string = startAfter.trim();
+                    GM_setValue('start_after_string', Configs.start_after_string);
+                }
+            } else if (title === '新建子目录') {
                 const subdir = prompt('请输入子目录名称:', Configs.current_subdir);
                 if (subdir !== null) {
                     Configs.current_subdir = subdir.trim();
@@ -1262,7 +1323,14 @@ let UiHelper = (function ($win, $doc) {
         // Insert elements
         record.target.firstChild.insertBefore(ariaTrigger, record.target.firstChild.firstChild);
         document.querySelector('.wrap-vflow').appendChild(popupBox);
-        record.target.childNodes[1].setAttribute("style", "display:none;");
+        
+        // Remove set-top and edit menu items
+        const menuItems = record.target.firstChild.querySelectorAll('li');
+        menuItems.forEach(item => {
+            if (item.getAttribute('menu') === 'setTop' || item.getAttribute('menu') === 'edit' || item.getAttribute('menu') === 'edit_file_label') {
+                item.remove();
+            }
+        });
         
         // Add click event listener for aria trigger
         ariaTrigger.addEventListener('click', _clickHandler);
