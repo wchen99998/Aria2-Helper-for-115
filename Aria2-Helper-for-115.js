@@ -4,7 +4,7 @@
 
 // @description  直接将所选 115 下载链接发送至 Aria2
 // @author       tces1
-// @match        *://115.com/?ct=file*
+// @match        *://115.com/storage/netdisk*
 // @encoding     utf-8
 // @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
@@ -121,21 +121,6 @@ const modalStyles = `
     color: white;
 }
 
-.aria2-wrapper {
-    position: relative;
-}
-
-.aria2-subdir-panel {
-    position: absolute;
-    top: 100%;
-    left: 0;
-    z-index: 1000;
-    display: none;
-}
-
-.aria2-wrapper:hover .aria2-subdir-panel {
-    display: block;
-}
 `;
 
 // Add the styles to the document
@@ -145,43 +130,97 @@ document.head.appendChild(styleSheet);
 
 // Add CSS styles for subdir dropdown
 const subdirStyles = `
-.aria2-wrapper {
-    position: relative;
-    display: inline-block;
+.aria2-progress-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.7);
+    z-index: 10000;
+    display: none;
+    justify-content: center;
+    align-items: center;
 }
 
-.subdir-dropdown {
+.aria2-progress-container {
+    background: white;
+    padding: 30px;
+    border-radius: 10px;
+    width: 500px;
+    max-width: 90vw;
+    text-align: center;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.aria2-progress-title {
+    font-size: 18px;
+    font-weight: bold;
+    margin-bottom: 20px;
+    color: #333;
+}
+
+.aria2-progress-bar {
+    width: 100%;
+    height: 20px;
+    background-color: #f0f0f0;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 15px;
+}
+
+.aria2-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #4CAF50, #45a049);
+    width: 0%;
+    transition: width 0.3s ease;
+    border-radius: 10px;
+}
+
+.aria2-progress-text {
+    font-size: 14px;
+    color: #666;
+    margin-bottom: 10px;
+}
+
+.aria2-progress-details {
+    font-size: 12px;
+    color: #999;
+    line-height: 1.4;
+}
+
+.aria2-progress-cancel {
+    margin-top: 15px;
+    padding: 8px 20px;
+    background-color: #f44336;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.aria2-progress-cancel:hover {
+    background-color: #da190b;
+}
+
+.aria2-action-wrapper {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.aria2-action-wrapper .aria2-subdir-popup {
     display: none;
     position: absolute;
     top: 100%;
     left: 0;
-    background: white;
-    border: 1px solid #ddd;
-    z-index: 1000;
-    min-width: 150px;
-    max-height: 200px;
-    overflow-y: auto;
+    margin-top: 6px;
+    z-index: 9999;
 }
 
-.subdir-dropdown:hover,
-.aria2-wrapper:hover .subdir-dropdown {
+.aria2-action-wrapper:hover .aria2-subdir-popup {
     display: block;
-}
-
-.subdir-item {
-    padding: 5px 10px;
-    cursor: pointer;
-    white-space: nowrap;
-}
-
-.subdir-item:hover {
-    background: #f0f0f0;
-}
-
-.subdir-input {
-    padding: 5px;
-    width: 200px;
-    margin-top: 5px;
 }
 `;
 
@@ -222,8 +261,8 @@ const configModalHTML = `
                 <input type="number" id="min_file_size_mb" name="min_file_size_mb" placeholder="0" min="0" step="0.1">
             </div>
             <div class="aria2-config-field">
-                <label for="start_after_string">开始下载位置 (部分匹配文件名):</label>
-                <input type="text" id="start_after_string" name="start_after_string" placeholder="输入文件名的一部分，从匹配的文件开始下载">
+                <label for="start_after_string">开始下载位置 (部分匹配文件名，仅一次有效):</label>
+                <input type="text" id="start_after_string" name="start_after_string" placeholder="输入文件名的一部分，从匹配的文件开始下载 (仅一次有效)">
             </div>
             <div class="aria2-config-field">
                 <label>
@@ -261,6 +300,24 @@ const configModalHTML = `
 // Add modal to document
 document.body.insertAdjacentHTML('beforeend', configModalHTML);
 
+// Progress bar HTML
+const progressBarHTML = `
+<div id="aria2ProgressOverlay" class="aria2-progress-overlay">
+    <div class="aria2-progress-container">
+        <div class="aria2-progress-title">正在发送至 Aria2...</div>
+        <div class="aria2-progress-bar">
+            <div class="aria2-progress-fill" id="aria2ProgressFill"></div>
+        </div>
+        <div class="aria2-progress-text" id="aria2ProgressText">准备中...</div>
+        <div class="aria2-progress-details" id="aria2ProgressDetails"></div>
+        <button class="aria2-progress-cancel" id="aria2ProgressCancel">取消</button>
+    </div>
+</div>
+`;
+
+// Add progress bar to document
+document.body.insertAdjacentHTML('beforeend', progressBarHTML);
+
 // Config management
 let Configs = {
     'debug_mode': GM_getValue('debug_mode', true),
@@ -275,6 +332,7 @@ let Configs = {
     'recent_subdirs': GM_getValue('recent_subdirs', []),
     'min_file_size_mb': GM_getValue('min_file_size_mb', 0),
     'start_after_string': GM_getValue('start_after_string', ''),
+    'use_proxy': GM_getValue('use_proxy', false),
 };
 
 // Config modal management
@@ -326,6 +384,105 @@ function initConfigModal() {
         closeModal();
         _notification('配置已保存');
     };
+}
+
+// Cache file list data from the new UI
+const FileListCache = {
+    items: [],
+    aid: null,
+    cid: null,
+    timestamp: 0,
+};
+
+let fileListInterceptorInitialized = false;
+
+function shouldCaptureFileList(url) {
+    return typeof url === 'string' && url.indexOf('webapi.115.com/files') !== -1;
+}
+
+function parseAidCid(url) {
+    try {
+        const parsedUrl = new URL(url, unsafeWindow.location.origin);
+        return {
+            aid: parsedUrl.searchParams.get('aid'),
+            cid: parsedUrl.searchParams.get('cid'),
+        };
+    } catch (e) {
+        return {
+            aid: null,
+            cid: null,
+        };
+    }
+}
+
+function updateFileListCache(url, payload) {
+    if (!payload || payload.state !== true) return;
+
+    let list = [];
+    if (Array.isArray(payload.data)) {
+        list = payload.data;
+    } else if (payload.data && Array.isArray(payload.data.data)) {
+        list = payload.data.data;
+    }
+
+    if (!list.length) return;
+
+    const meta = parseAidCid(url);
+    FileListCache.items = list;
+    FileListCache.aid = meta.aid || FileListCache.aid;
+    FileListCache.cid = meta.cid || FileListCache.cid;
+    FileListCache.timestamp = Date.now();
+}
+
+function initFileListInterceptor() {
+    if (fileListInterceptorInitialized) return;
+    fileListInterceptorInitialized = true;
+
+    // Intercept fetch
+    if (unsafeWindow.fetch) {
+        const originalFetch = unsafeWindow.fetch.bind(unsafeWindow);
+        unsafeWindow.fetch = function (...args) {
+            return originalFetch(...args).then((response) => {
+                try {
+                    const url = response && response.url ? response.url : args[0];
+                    if (shouldCaptureFileList(url)) {
+                        response.clone().json().then((data) => {
+                            updateFileListCache(url, data);
+                        }).catch(emptyFunc);
+                    }
+                } catch (e) {
+                    // ignore
+                }
+                return response;
+            });
+        };
+    }
+
+    // Intercept XHR
+    const originalOpen = unsafeWindow.XMLHttpRequest.prototype.open;
+    const originalSend = unsafeWindow.XMLHttpRequest.prototype.send;
+
+    unsafeWindow.XMLHttpRequest.prototype.open = function (method, url) {
+        this._aria2_url = url;
+        return originalOpen.apply(this, arguments);
+    };
+
+    unsafeWindow.XMLHttpRequest.prototype.send = function () {
+        this.addEventListener('load', () => {
+            if (shouldCaptureFileList(this._aria2_url)) {
+                try {
+                    updateFileListCache(this._aria2_url, JSON.parse(this.responseText));
+                } catch (e) {
+                    // ignore
+                }
+            }
+        });
+        return originalSend.apply(this, arguments);
+    };
+}
+
+function isNewNetdiskUI() {
+    return unsafeWindow.location.pathname.indexOf('/storage') === 0 || !!document.querySelector('.file-list-wrap');
 }
 
 // Crypto
@@ -653,6 +810,10 @@ let Aria2RPC = (function ($win, $doc) {
                 finalOptions.dir = finalOptions.dir.replace(/^\//, '');
             }
 
+            if (Configs.use_proxy) {
+                finalOptions['all-proxy'] = 'http://127.0.0.1:1081';
+            }
+
             // Add options to params if we have any
             if (Object.keys(finalOptions).length > 0) {
                 reqParams.params.push(finalOptions);
@@ -742,6 +903,119 @@ let QueueManager = (function ($win, $doc) {
     const STATUS_LINK_FETCH_FAILURE = -2;
     const STATUS_GET_DIR_FILES_FAILURE = -3;
 
+    function parseSizeToBytes(sizeText) {
+        if (!sizeText) return null;
+        const normalized = sizeText.replace(/\s+/g, '').toUpperCase();
+        if (normalized === '-' || normalized === '') return null;
+        const match = normalized.match(/^([\d.]+)(B|KB|MB|GB|TB|PB)$/);
+        if (!match) return null;
+        const value = parseFloat(match[1]);
+        const unit = match[2];
+        const units = {
+            'B': 1,
+            'KB': 1024,
+            'MB': 1024 ** 2,
+            'GB': 1024 ** 3,
+            'TB': 1024 ** 4,
+            'PB': 1024 ** 5,
+        };
+        return value * units[unit];
+    }
+
+    function getNewUiSelectedRows() {
+        const container = $doc.querySelector('.file-list-wrap');
+        if (!container) return [];
+        return Array.from(container.querySelectorAll('.file-list-item[data-index]')).filter((row) => {
+            const checkbox = row.querySelector('input[type="checkbox"]');
+            return checkbox && checkbox.checked;
+        });
+    }
+
+    function getRowName(row) {
+        const nameEl = row.querySelector('.file-name-responsive');
+        return nameEl ? nameEl.textContent.trim() : '';
+    }
+
+    function getRowInfoColumns(row) {
+        const infoEls = row.querySelectorAll('.file-info-responsive');
+        return {
+            sizeText: infoEls[0] ? infoEls[0].textContent.trim() : '',
+            typeText: infoEls[1] ? infoEls[1].textContent.trim() : '',
+        };
+    }
+
+    function isRowDirectory(typeText) {
+        return typeText.indexOf('文件夹') !== -1;
+    }
+
+    function findCachedItemForRow(row) {
+        const idx = Number.parseInt(row.dataset.index || '', 10);
+        if (Number.isFinite(idx) && FileListCache.items[idx]) {
+            return FileListCache.items[idx];
+        }
+
+        const name = getRowName(row);
+        const info = getRowInfoColumns(row);
+        const rowSize = parseSizeToBytes(info.sizeText);
+        const rowIsDir = isRowDirectory(info.typeText);
+
+        return FileListCache.items.find((item) => {
+            if (!item || item.n !== name) return false;
+            if (rowIsDir) {
+                return !item.fid && !!item.cid;
+            }
+            if (!item.fid) return false;
+            if (rowSize === null || typeof item.s !== 'number') return true;
+            return Math.abs(item.s - rowSize) < 1;
+        });
+    }
+
+    function collectSelectedItemsNewUI() {
+        const selectedRows = getNewUiSelectedRows();
+        if (!selectedRows.length) return [];
+
+        if (!FileListCache.items.length) {
+            _notification('未读取到文件列表，请稍后重试或刷新页面');
+            return [];
+        }
+
+        return selectedRows.map((row) => {
+            const cachedItem = findCachedItemForRow(row);
+            const info = getRowInfoColumns(row);
+            const rowIsDir = isRowDirectory(info.typeText);
+            const name = (cachedItem && cachedItem.n) ? cachedItem.n : getRowName(row);
+            const aid = (cachedItem && cachedItem.aid) ? cachedItem.aid : (FileListCache.aid || '1');
+            const cid = cachedItem ? (cachedItem.cid || cachedItem.cate_id || null) : null;
+            const pickcode = cachedItem ? (cachedItem.pc || cachedItem.pickcode || cachedItem.pick_code || null) : null;
+            const isDirectory = rowIsDir || (cachedItem && !cachedItem.fid);
+
+            if (!isDirectory && !pickcode) {
+                console.warn('Missing pickcode for selected item:', name);
+                return null;
+            }
+            if (isDirectory && !cid) {
+                console.warn('Missing cid for selected folder:', name);
+                return null;
+            }
+
+            return {
+                'name': name,
+                'code': pickcode,
+                'cid': cid,
+                'aid': aid,
+                'link': null,
+                'dir': '',
+                'cookie': null,
+                'isDirectory': isDirectory,
+                'status': STATUS_UNSTART
+            };
+        }).filter(Boolean);
+    }
+
+    function collectSelectedItems() {
+        return collectSelectedItemsNewUI();
+    }
+
     // Pure function to fetch download link for a file
     function fetchDownloadLink(pickcode) {
         return new Promise((resolve, reject) => {
@@ -794,11 +1068,12 @@ let QueueManager = (function ($win, $doc) {
         return new Promise((resolve, reject) => {
             let allFiles = [];
             const limit = 32; // Items per page
+            const listAid = aid || FileListCache.aid || 1;
             
             function fetchPage(offset) {
                 GM_xmlhttpRequest({
                     method: 'GET',
-                    url: `https://webapi.115.com/files?aid=${aid}&cid=${cid}&o=user_ptime&asc=0&offset=${offset}&show_dir=1&limit=${limit}&snap=0&natsort=1&record_open_time=1&count_folders=1&format=json`,
+                    url: `https://webapi.115.com/files?aid=${listAid}&cid=${cid}&o=user_ptime&asc=0&offset=${offset}&show_dir=1&limit=${limit}&snap=0&natsort=1&record_open_time=1&count_folders=1&format=json`,
                     headers: {
                         'Content-Type': 'application/x-www-form-urlencoded',
                         'Cookie': document.cookie,
@@ -854,25 +1129,21 @@ let QueueManager = (function ($win, $doc) {
         // err msgs
         this.errMsgs = [];
 
-        // get selected ones
-        let selectedNodes = $doc.getElementById('js_cantain_box').querySelectorAll('li.selected');
-
-        // build the queue
-        this.queue = Array.from(selectedNodes).map(function (node) {
-            return {
-                'name': node.getAttribute('title'),
-                'code': node.getAttribute('pick_code'),
-                'cid': node.getAttribute('cate_id'),
-                'aid': node.getAttribute('area_id'),
-                'link': null,
-                'dir': '',
-                'cookie': null,
-                'isDirectory': node.getAttribute('file_type') === '0',
-                'status': STATUS_UNSTART
-            };
-        }, this);
+        // build the queue from selected items
+        this.queue = collectSelectedItems();
 
         this.subdir = Configs.current_subdir || '';
+        // Capture start-after string for this session and clear it
+        this.startAfterString = Configs.start_after_string || '';
+        if (this.startAfterString) {
+            Configs.start_after_string = '';
+            GM_setValue('start_after_string', '');
+        }
+        
+        // Progress tracking
+        this.totalFiles = 0;
+        this.processedFiles = 0;
+        this.isCancelled = false;
     }
 
     // static
@@ -908,6 +1179,8 @@ let QueueManager = (function ($win, $doc) {
 
         // update the status
         this.queue[idx].status = errCode;
+        this.processedFiles++;
+        this.updateProgress(this.processedFiles, this.totalFiles, this.queue[idx].name, '处理失败: ' + error.message.substring(0, 30));
         this.next();
     };
 
@@ -916,6 +1189,8 @@ let QueueManager = (function ($win, $doc) {
             // update the status
             console.log("Sent to aria2:", this.queue[idx].name)
             this.queue[idx].status = STATUS_SENT_TO_ARIA2;
+            this.processedFiles++;
+            this.updateProgress(this.processedFiles, this.totalFiles, this.queue[idx].name, '发送成功');
             this.next();
         } else {
             // failed
@@ -925,6 +1200,8 @@ let QueueManager = (function ($win, $doc) {
 
     Mgr.prototype.directDownloadHandler = function (idx) {
         this.queue[idx].status = STATUS_SENT_TO_DIRECT_DOWNLOAD;
+        this.processedFiles++;
+        this.updateProgress(this.processedFiles, this.totalFiles, this.queue[idx].name, '直接下载开始');
         this.next();
     };
 
@@ -966,12 +1243,18 @@ let QueueManager = (function ($win, $doc) {
 
     Mgr.prototype.processQueue = async function() {
         for (let idx = 0; idx < this.queue.length; idx++) {
+            if (this.isCancelled) {
+                return;
+            }
+            
             const item = this.queue[idx];
+            this.updateProgress(idx, this.totalFiles, item.name, `正在处理: ${item.isDirectory ? '目录' : '文件'}`);
             
             try {
                 if (item.isDirectory) {
                     // Fetch direct children files from directory
                     console.log("Processing directory:", item.name);
+                    this.updateProgress(idx, this.totalFiles, item.name, '正在获取目录文件列表...');
                     const files = await fetchDirectoryFiles(item.cid, item.aid);
                     
                     // Add files to queue with size filtering and start-after filtering
@@ -1031,6 +1314,10 @@ let QueueManager = (function ($win, $doc) {
                     this.filterStats.skipped += skippedCount;
                     this.filterStats.startAfterSkipped += startAfterCount;
                     
+                    // Update total files count and progress
+                    this.totalFiles += addedCount;
+                    this.updateProgress(idx + 1, this.totalFiles, item.name, `目录处理完成: 添加 ${addedCount} 个文件`);
+                    
                     if (Configs.debug_mode) {
                         console.log(`Directory "${item.name}": ${addedCount} files added, ${skippedCount} files skipped (< ${Configs.min_file_size_mb} MB), ${startAfterCount} files skipped before start-after`);
                     }
@@ -1040,11 +1327,13 @@ let QueueManager = (function ($win, $doc) {
                 } else {
                     // Fetch download link for file
                     console.log("Processing file:", item.name);
+                    this.updateProgress(idx, this.totalFiles, item.name, '正在获取下载链接...');
                     const linkData = await fetchDownloadLink(item.code);
                     item.link = linkData.url;
                     item.cookie = linkData.cookie;
                     item.status = STATUS_START;
                     
+                    this.updateProgress(idx, this.totalFiles, item.name, '正在发送至 Aria2...');
                     // Download the file
                     this.download(idx);
                 }
@@ -1055,7 +1344,58 @@ let QueueManager = (function ($win, $doc) {
         }
     };
 
+    Mgr.prototype.showProgress = function() {
+        const overlay = document.getElementById('aria2ProgressOverlay');
+        const cancelBtn = document.getElementById('aria2ProgressCancel');
+        
+        overlay.style.display = 'flex';
+        
+        // Add cancel functionality
+        cancelBtn.onclick = () => {
+            this.isCancelled = true;
+            this.hideProgress();
+            _notification('下载已取消');
+        };
+    };
+    
+    Mgr.prototype.hideProgress = function() {
+        const overlay = document.getElementById('aria2ProgressOverlay');
+        overlay.style.display = 'none';
+    };
+    
+    Mgr.prototype.updateProgress = function(current, total, currentFileName, details) {
+        if (this.isCancelled) return;
+        
+        const progressFill = document.getElementById('aria2ProgressFill');
+        const progressText = document.getElementById('aria2ProgressText');
+        const progressDetails = document.getElementById('aria2ProgressDetails');
+        
+        const percentage = total > 0 ? Math.round((current / total) * 100) : 0;
+        
+        progressFill.style.width = percentage + '%';
+        progressText.textContent = `${current} / ${total} (${percentage}%)`;
+        
+        if (currentFileName) {
+            const truncatedName = currentFileName.length > 40 ? 
+                currentFileName.substring(0, 37) + '...' : currentFileName;
+            progressDetails.textContent = `当前文件: ${truncatedName}\n${details || ''}`;
+        } else {
+            progressDetails.textContent = details || '';
+        }
+    };
+
     Mgr.prototype.init = function () {
+        if (!this.queue.length) {
+            _notification('未选择任何文件');
+            return;
+        }
+        // Show progress bar
+        this.showProgress();
+        
+        // Count total files that will be processed
+        this.totalFiles = this.queue.length;
+        this.updateProgress(0, this.totalFiles, '', '正在初始化...');
+        
         // Process queue
         debug("Init queue:", this.queue);
         this.processQueue().then(() => {
@@ -1063,6 +1403,7 @@ let QueueManager = (function ($win, $doc) {
             this.next();
         }).catch(error => {
             console.error("Error processing queue:", error);
+            this.hideProgress();
         });
     };
 
@@ -1120,6 +1461,9 @@ let QueueManager = (function ($win, $doc) {
                 }
             }
             
+            // Hide progress bar
+            this.hideProgress();
+            
             _notification(msg.join("\n"));
 
             if (this.options.copyOnly || Configs.sync_clipboard) {
@@ -1145,39 +1489,15 @@ let QueueManager = (function ($win, $doc) {
 // UI Helper
 let UiHelper = (function ($win, $doc) {
     let _triggerId = 'aria2Trigger';
-    let _configTriggerId = 'aria2ConfigTrigger';
 
     function _clickHandler(evt) {
-        // If clicking a subdir item, handle subdir selection
-        if (evt.target.classList.contains('subdir-item')) {
-            evt.preventDefault();
-            if (evt.target.title === "设置开始位置") {
-                const startAfter = prompt('请输入文件名的一部分，从匹配的文件开始下载:', Configs.start_after_string);
-                if (startAfter !== null) {
-                    Configs.start_after_string = startAfter.trim();
-                    GM_setValue('start_after_string', Configs.start_after_string);
-                }
-            } else if (evt.target.title === "新建子目录") {
-                const subdir = prompt('请输入子目录名称:', Configs.current_subdir);
-                if (subdir !== null) {
-                    Configs.current_subdir = subdir.trim();
-                    GM_setValue('current_subdir', Configs.current_subdir);
-                    updateRecentSubdirs(Configs.current_subdir);
-                }
-            } else {
-                Configs.current_subdir = evt.target.textContent.trim();
-                GM_setValue('current_subdir', Configs.current_subdir);
-                updateRecentSubdirs(Configs.current_subdir);
-            }
-            // Update the button title
-            evt.currentTarget.title = `当前子目录: ${Configs.current_subdir}\n点击发送至Aria2\n按住Alt点击仅复制链接\n按住Ctrl/Command点击直接下载`;
-            return;
-        }
-
         // Main button click - proceed without prompt
+        const wantsDirectDownload = evt.ctrlKey || evt.metaKey;
+        const wantsCopyOnly = evt.altKey && !wantsDirectDownload;
+
         (new QueueManager({
-            'directDownload': (evt.ctrlKey || evt.metaKey) && !evt.altKey,
-            'copyOnly': evt.altKey && !evt.ctrlKey && !evt.metaKey,
+            'directDownload': wantsDirectDownload,
+            'copyOnly': wantsCopyOnly,
         })).init();
     }
 
@@ -1186,161 +1506,157 @@ let UiHelper = (function ($win, $doc) {
         modal.style.display = 'block';
     }
 
-    function _recordHandler(record) {
-        // Add Aria2 button
-        let ariaTrigger = $doc.createElement('li');
-        ariaTrigger.id = _triggerId;
-        ariaTrigger.title = `当前子目录: ${Configs.current_subdir}`;
-        ariaTrigger.innerHTML = `
-            <i class="icon-operate ifo-share"></i>
-            <span>Aria2</span>
-        `;
-
-        // Create popup box for subdirectory selection
+    function buildNewUiSubdirPopup(ariaTrigger) {
         const popupBox = document.createElement('div');
-        popupBox.className = 'popup-box';
-        popupBox.setAttribute('data-dropdown-content', 'aria2_subdir');
-        popupBox.style.cssText = 'display: none; z-index: 9999999;';
+        popupBox.className = 'aria2-subdir-popup';
         popupBox.innerHTML = `
-            <em class="arrow-position" style="left:20px; right:auto">
-                <i class="arrow"></i>
-                <s class="arrow"></s>
-            </em>
-            <div class="operation-file">
-                <dl style="margin-top: 20px">
-                    <dt>
-                        <strong>子目录选择</strong>
-                        <div class="side">
-                            <div class="op-switch-wrap">
-                                <span>当前目录: ${Configs.current_subdir || '默认'}</span>
-                            </div>
-                        </div>
-                    </dt>
-                    <dd>
-                        <div class="list-filter" id="js_subdir_box">
-                            <a href="javascript:;" class="subdir-item" title="设置开始位置" style="color: #0066cc; font-weight: bold;">
-                                <span>设置开始位置...</span>
-                            </a>
-                            <a href="javascript:;" class="subdir-item" title="新建子目录" style="color: #666; font-weight: bold;">
-                                <span>新建子目录...</span>
-                            </a>
-                            ${(Configs.recent_subdirs || []).map(dir => `
-                                <a href="javascript:;" class="subdir-item" title="${dir}">
-                                    <span>${dir}</span>
-                                </a>
-                            `).join('')}
-                        </div>
-                    </dd>
-                </dl>
+            <div class="bg-white border border-gray-200 rounded-md shadow-lg p-2 w-64">
+                <div class="text-xs text-gray-500 mb-2">
+                    当前目录: <span class="aria2-current-dir">${Configs.current_subdir || '默认'}</span>
+                </div>
+                <div class="max-h-64 overflow-auto space-y-1">
+                    <button type="button" class="subdir-item w-full text-left px-2 py-1 text-sm text-blue-600 hover:bg-blue-50 rounded" title="设置开始位置">设置开始位置...</button>
+                    <button type="button" class="subdir-item w-full text-left px-2 py-1 text-sm text-gray-700 hover:bg-gray-50 rounded" title="新建子目录">新建子目录...</button>
+                    ${(Configs.recent_subdirs || []).map(dir => `
+                        <button type="button" class="subdir-item w-full text-left px-2 py-1 text-sm text-gray-700 hover:bg-gray-50 rounded" title="${dir}">
+                            ${dir}
+                        </button>
+                    `).join('')}
+                </div>
+                <label class="flex items-center gap-2 text-xs text-gray-600 mt-2 cursor-pointer">
+                    <input type="checkbox" id="aria2_use_proxy">
+                    <span>启用代理 (127.0.0.1:1081)</span>
+                </label>
             </div>
         `;
 
-        // Add event listeners for popup
-        ariaTrigger.addEventListener('mouseenter', () => {
-            const rect = ariaTrigger.getBoundingClientRect();
-            const scrollTop = window.scrollY;
-            const scrollLeft = window.scrollX;
-            
-            // Position the popup below the button
-            popupBox.style.top = (rect.bottom + scrollTop + 8) + 'px';
-            popupBox.style.left = (rect.left + scrollLeft - 10) + 'px'; // Align with button, accounting for padding
-            popupBox.style.display = 'block';
-        });
+        const proxyToggle = popupBox.querySelector('#aria2_use_proxy');
+        if (proxyToggle) {
+            proxyToggle.checked = !!Configs.use_proxy;
+            proxyToggle.addEventListener('change', (e) => {
+                Configs.use_proxy = e.target.checked;
+                GM_setValue('use_proxy', Configs.use_proxy);
+            });
+        }
 
-        popupBox.addEventListener('mouseleave', () => {
-            popupBox.style.display = 'none';
-        });
-
-        // Handle subdirectory clicks
         popupBox.addEventListener('click', (e) => {
             e.stopPropagation();
             const subdirItem = e.target.closest('.subdir-item');
             if (!subdirItem) return;
 
-            e.preventDefault();
-            e.stopPropagation();
-
             const title = subdirItem.title;
             if (title === '设置开始位置') {
-                const startAfter = prompt('请输入文件名的一部分，从匹配的文件开始下载:', Configs.start_after_string);
+                const startAfter = prompt('请输入文件名的一部分，从匹配的文件开始下载 (仅本次有效):', Configs.start_after_string);
                 if (startAfter !== null) {
                     Configs.start_after_string = startAfter.trim();
                     GM_setValue('start_after_string', Configs.start_after_string);
                 }
-            } else if (title === '新建子目录') {
+                return;
+            }
+
+            if (title === '新建子目录') {
                 const subdir = prompt('请输入子目录名称:', Configs.current_subdir);
                 if (subdir !== null) {
                     Configs.current_subdir = subdir.trim();
-                    GM_setValue('current_subdir', Configs.current_subdir);
-                    updateRecentSubdirs(Configs.current_subdir);
-                    // Update current directory display
-                    const currentDirSpan = popupBox.querySelector('.op-switch-wrap span');
-                    currentDirSpan.textContent = `当前目录: ${Configs.current_subdir || '默认'}`;
-                    // Update trigger title
-                    ariaTrigger.title = `当前子目录: ${Configs.current_subdir}\n点击发送至Aria2\n按住Alt点击仅复制链接\n按住Ctrl/Command点击直接下载`;
-                    // Trigger download after setting new subdir
-                    (new QueueManager({
-                        'directDownload': false,
-                        'copyOnly': false,
-                    })).init();
+                } else {
+                    return;
                 }
             } else {
                 Configs.current_subdir = title;
-                GM_setValue('current_subdir', Configs.current_subdir);
-                updateRecentSubdirs(Configs.current_subdir);
-                // Update current directory display
-                const currentDirSpan = popupBox.querySelector('.op-switch-wrap span');
-                currentDirSpan.textContent = `当前目录: ${Configs.current_subdir || '默认'}`;
-                // Update trigger title
-                ariaTrigger.title = `当前子目录: ${Configs.current_subdir}\n点击发送至Aria2\n按住Alt点击仅复制链接\n按住Ctrl/Command点击直接下载`;
-                // Trigger download after selecting subdir
-                (new QueueManager({
-                    'directDownload': false,
-                    'copyOnly': false,
-                })).init();
             }
-            popupBox.style.display = 'none';
+
+            GM_setValue('current_subdir', Configs.current_subdir);
+            updateRecentSubdirs(Configs.current_subdir);
+
+            const currentDirSpan = popupBox.querySelector('.aria2-current-dir');
+            if (currentDirSpan) {
+                currentDirSpan.textContent = Configs.current_subdir || '默认';
+            }
+
+            ariaTrigger.title = `当前子目录: ${Configs.current_subdir}\n点击发送至Aria2\n按住Alt点击仅复制链接\n按住Ctrl/Command点击直接下载`;
+
+            (new QueueManager({
+                'directDownload': false,
+                'copyOnly': false,
+            })).init();
         });
 
-        // Add this new event listener to prevent clicks on the dropdown from propagating
         popupBox.addEventListener('mousedown', (e) => {
             e.stopPropagation();
         });
 
-        // Add config button to existing context menu if it doesn't exist yet
-        const leftMoreMenu = $doc.querySelector('#js_context_menu_box [data-dropdown-content="left_more_menu"] .cell-icon');
-        if (leftMoreMenu && !$doc.getElementById(_configTriggerId)) {
-            leftMoreMenu.insertAdjacentHTML('beforeend', `
-                <a href="javascript:;" id="${_configTriggerId}">
-                    <i class="icon-operate ifo-settings"></i>
-                    <span>Aria2配置</span>
-                </a>
-            `);
-            // Add click event listener for config button
-            $doc.getElementById(_configTriggerId).addEventListener('click', _configClickHandler);
+        return popupBox;
+    }
+
+    function findNewUiActionBar() {
+        const uploadIcon = $doc.querySelector('i.icon-operate.ifo-upload');
+        if (uploadIcon) {
+            const container = uploadIcon.closest('div.relative');
+            if (container && container.parentElement) {
+                return container.parentElement;
+            }
         }
 
-        // Insert elements
-        record.target.firstChild.insertBefore(ariaTrigger, record.target.firstChild.firstChild);
-        document.querySelector('.wrap-vflow').appendChild(popupBox);
-        
-        // Remove set-top and edit menu items
-        const menuItems = record.target.firstChild.querySelectorAll('li');
-        menuItems.forEach(item => {
-            if (item.getAttribute('menu') === 'setTop' || item.getAttribute('menu') === 'edit' || item.getAttribute('menu') === 'edit_file_label') {
-                item.remove();
-            }
+        const uploadButton = Array.from($doc.querySelectorAll('button')).find(btn => {
+            return btn.textContent && btn.textContent.trim() === '上传';
         });
-        
-        // Add click event listener for aria trigger
-        ariaTrigger.addEventListener('click', _clickHandler);
+        if (uploadButton) {
+            return uploadButton.closest('div.flex.items-center.space-x-2');
+        }
 
+        return null;
+    }
+
+    function insertNewUiButtons() {
+        const actionBar = findNewUiActionBar();
+        if (!actionBar || $doc.getElementById(_triggerId)) {
+            return false;
+        }
+
+        const wrapper = $doc.createElement('div');
+        wrapper.id = _triggerId;
+        wrapper.className = 'aria2-action-wrapper';
+
+        const ariaBtn = $doc.createElement('button');
+        ariaBtn.type = 'button';
+        ariaBtn.className = 'flex items-center gap-1 px-3 h-8 text-sm rounded-md transition-colors bg-blue-600 text-white hover:bg-blue-700';
+        ariaBtn.title = `当前子目录: ${Configs.current_subdir}\n点击发送至Aria2\n按住Alt点击仅复制链接\n按住Ctrl/Command点击直接下载`;
+        ariaBtn.innerHTML = `
+            <span>Aria2</span>
+            <img alt="" loading="lazy" width="12" height="12" decoding="async" data-nimg="1" class="transition-transform brightness-0 invert" src="/arrow_down_small.svg" style="color: transparent;">
+        `;
+        ariaBtn.addEventListener('click', _clickHandler);
+
+        const configBtn = $doc.createElement('button');
+        configBtn.type = 'button';
+        configBtn.className = 'flex items-center gap-1 px-3 h-8 text-sm rounded-md transition-colors bg-gray-100 text-gray-700 hover:bg-gray-200';
+        configBtn.textContent = 'Aria2配置';
+        configBtn.addEventListener('click', _configClickHandler);
+
+        wrapper.appendChild(ariaBtn);
+        wrapper.appendChild(configBtn);
+        wrapper.appendChild(buildNewUiSubdirPopup(ariaBtn));
+
+        actionBar.appendChild(wrapper);
         return true;
     }
 
+    function initNewUi() {
+        if (!isNewNetdiskUI()) return;
+
+        insertNewUiButtons();
+        const observer = new MutationObserver(() => {
+            insertNewUiButtons();
+        });
+        observer.observe($doc.body, {
+            childList: true,
+            subtree: true,
+        });
+    }
+
     function _init() {
-        let container = $doc.getElementById('js_operate_box');
         initConfigModal();
+        initFileListInterceptor();
 
         // Initialize recent_subdirs if it doesn't exist
         if (!Configs.recent_subdirs) {
@@ -1348,14 +1664,8 @@ let UiHelper = (function ($win, $doc) {
             GM_setValue('recent_subdirs', []);
         }
 
-        new MutationObserver(function (records) {
-            records.filter(function () {
-                return null === $doc.getElementById(_triggerId);
-            }).some(_recordHandler);
-        }).observe(container, {
-            'childList': true,
-        });
-        
+        initNewUi();
+
         Aria2RPC.getGlobalOption(
             function (resp) {
                 if (200 === resp.status && 'responseText' in resp) {
